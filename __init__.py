@@ -1,4 +1,6 @@
 import bpy
+import os
+import bpy.utils.previews
 
 # Add-on information
 bl_info = {
@@ -10,6 +12,60 @@ bl_info = {
     "description": "Add Ken Burns effect to selected image or movie strips",
     "category": "Sequencer"
 }
+
+# Global variable to store custom icons
+custom_icons = None
+
+import bpy
+
+def _animated_properties_get(sequence):
+    """Returns a list of animated properties for the given sequence."""
+    animated_properties = []
+    if hasattr(sequence, "volume"):
+        animated_properties.append("volume")
+    if hasattr(sequence, "blend_alpha"):
+        animated_properties.append("blend_alpha")
+    # Add other properties if needed (scale_x, scale_y, offset_x, etc.)
+    return animated_properties
+
+def remove_keyframes_from_active_strip(context):
+    """Removes keyframes and curves from the active strip in the Sequence Editor."""
+    scene = context.scene
+    animation_data = scene.animation_data
+    if animation_data is None:
+        return {'CANCELLED'}
+
+    action = animation_data.action
+    if action is None:
+        return {'CANCELLED'}
+
+    fcurves = action.fcurves
+    fcurve_map = {
+        curve.data_path: curve
+        for curve in fcurves
+        if curve.data_path.startswith("sequence_editor.strips_all")
+    }
+
+    # Ensure the active strip is the one in focus
+    active_strip = context.scene.sequence_editor.active_strip
+    if not active_strip:
+        return {'CANCELLED'}
+
+    # Iterate over the animated properties of the active strip
+    for animated_property in _animated_properties_get(active_strip):
+        data_path = active_strip.path_from_id() + "." + animated_property
+        curve = fcurve_map.get(data_path)
+        
+        if curve:
+            fcurves.remove(curve)  # Remove the keyframe curve
+        
+        setattr(active_strip, animated_property, 1.0)  # Reset property value
+
+    active_strip.invalidate_cache('COMPOSITE')  # Update the strip cache
+
+    return {'FINISHED'}
+
+
 
 class AddKenBurnsEffect(bpy.types.Operator):
     """Add Ken Burns effect to selected image or movie strips"""
@@ -29,19 +85,32 @@ class AddKenBurnsEffect(bpy.types.Operator):
         interpolation = scene.interpolation
         preset = scene.ken_burns_preset
 
-        strips = [strip for strip in bpy.context.selected_editable_sequences if strip.type in ['IMAGE', 'MOVIE']]
+        strips = [strip for strip in bpy.context.selected_editable_sequences if strip.type in ['IMAGE', 'MOVIE', 'TEXT', 'SCENE']]
 
         for strip in strips:
             if not hasattr(strip, "transform"):
                 self.report({'WARNING'}, f"Strip {strip.name} has no transform properties.")
                 continue
-
+            old_active = context.scene.sequence_editor.active_strip
+            for window in bpy.context.window_manager.windows:
+                screen = window.screen
+                for area in screen.areas:
+                    if area.type in {'SEQUENCER','PREVIEW', 'SEQUENCER_PREVIEW'}:
+                        graph_editor_found = True
+                        with bpy.context.temp_override(window=window, area=area):
+                            bpy.ops.sequencer.select_all(action='DESELECT')
+            context.scene.sequence_editor.active_strip = strip
             elem = strip.strip_elem_from_frame(frame)  # Get image resolution at current frame
-            if not elem:
-                self.report({'WARNING'}, f"Cannot get image resolution for {strip.name}.")
-                continue
 
-            img_width, img_height = elem.orig_width, elem.orig_height  # Original image dimensions
+            if not elem:
+                #self.report({'WARNING'}, f"Cannot get image resolution for {strip.name}. Falling back to render resolution.")
+                
+                # Fallback to render resolution if no image resolution is found
+                img_width = bpy.context.scene.render.resolution_x
+                img_height = bpy.context.scene.render.resolution_y
+            else:
+                img_width, img_height = elem.orig_width, elem.orig_height  # Original image dimensions
+
             if img_height == 0:
                 continue  # Avoid division by zero
 
@@ -100,13 +169,8 @@ class AddKenBurnsEffect(bpy.types.Operator):
             transform.scale_y = in_value
             transform.offset_x = 0.0  # Start at center
             transform.offset_y = 0.0  # Start at center
-
-            # Remove all keyframes before inserting new ones
-            action = bpy.context.scene.animation_data.action
-            if action:
-                for fcurve in action.fcurves:
-                    if "scale_x" in fcurve.data_path or "scale_y" in fcurve.data_path or "offset_x" in fcurve.data_path or "offset_y" in fcurve.data_path:
-                        fcurve.keyframe_points.clear()  # Remove all keyframes
+            
+            remove_keyframes_from_active_strip(context)  
 
             # Insert keyframes for start values
             transform.keyframe_insert(data_path="scale_x", frame=strip.frame_final_start)
@@ -126,16 +190,23 @@ class AddKenBurnsEffect(bpy.types.Operator):
             transform.keyframe_insert(data_path="offset_x", frame=strip.frame_final_end)
             transform.keyframe_insert(data_path="offset_y", frame=strip.frame_final_end)
 
-            # Select all keyframes in the graph editor
-            for window in context.window_manager.windows:
+            graph_editor_found = False
+            for window in bpy.context.window_manager.windows:
                 screen = window.screen
                 for area in screen.areas:
                     if area.type == 'GRAPH_EDITOR':
-                        with context.temp_override(window=window, area=area):
+                        graph_editor_found = True
+                        with bpy.context.temp_override(window=window, area=area):
                             bpy.ops.graph.select_all(action='SELECT')
                             bpy.ops.graph.interpolation_type(type=interpolation)
+            if not graph_editor_found:
+                self.report({'INFO'}, "For interpolation to work, the Graph Editor must be visible in the workspace.")
+            context.scene.sequence_editor.active_strip = old_active
 
         return {'FINISHED'}
+
+def update_ken_burns_effect(self, context):
+    bpy.ops.sequencer.add_ken_burns_effect()
 
 class AddKenBurnsEffectPanel(bpy.types.Panel):
     """Panel for the Add Ken Burns Effect operator"""
@@ -145,7 +216,7 @@ class AddKenBurnsEffectPanel(bpy.types.Panel):
     bl_region_type = 'UI'
     bl_category = 'Strip Tools'
 
-    def draw(self, context):
+    def draw(self, context): 
         layout = self.layout
         layout.use_property_split = True
         layout.use_property_decorate = False
@@ -159,24 +230,44 @@ class AddKenBurnsEffectPanel(bpy.types.Panel):
         layout.operator("sequencer.add_ken_burns_effect", text="Add Ken Burns Effect")
 
 def register():
-    bpy.types.Scene.in_value = bpy.props.FloatProperty(name="Scale In", default=1.0, min=0.0)
-    bpy.types.Scene.out_value = bpy.props.FloatProperty(name="Out", default=1.1, min=0.0)
+    global custom_icons
+    custom_icons = bpy.utils.previews.new()
+
+    # Path to the folder containing the icons
+    icons_dir = os.path.join(os.path.dirname(__file__), "Icons")
+
+    # Load custom icons
+    custom_icons.load("ZOOM_CENTER", os.path.join(icons_dir, "ZOOM_CENTER.svg"), 'IMAGE')
+    custom_icons.load("ZOOM_TOP_CENTER", os.path.join(icons_dir, "ZOOM_TOP_CENTER.svg"), 'IMAGE')
+    custom_icons.load("ZOOM_BOTTOM_CENTER", os.path.join(icons_dir, "ZOOM_BOTTOM_CENTER.svg"), 'IMAGE')
+
+    custom_icons.load("ZOOM_TOP_LEFT", os.path.join(icons_dir, "ZOOM_TOP_LEFT.svg"), 'IMAGE')
+    custom_icons.load("ZOOM_MIDDLE_LEFT", os.path.join(icons_dir, "ZOOM_MIDDLE_LEFT.svg"), 'IMAGE')
+    custom_icons.load("ZOOM_BOTTOM_LEFT", os.path.join(icons_dir, "ZOOM_BOTTOM_LEFT.svg"), 'IMAGE')
+
+    custom_icons.load("ZOOM_TOP_RIGHT", os.path.join(icons_dir, "ZOOM_TOP_RIGHT.svg"), 'IMAGE')
+    custom_icons.load("ZOOM_MIDDLE_RIGHT", os.path.join(icons_dir, "ZOOM_MIDDLE_RIGHT.svg"), 'IMAGE')
+    custom_icons.load("ZOOM_BOTTOM_RIGHT", os.path.join(icons_dir, "ZOOM_BOTTOM_RIGHT.svg"), 'IMAGE')
+
+    bpy.types.Scene.in_value = bpy.props.FloatProperty(name="Scale Start", default=1.0, min=0.0, update=update_ken_burns_effect)
+    bpy.types.Scene.out_value = bpy.props.FloatProperty(name="End", default=1.1, min=0.0, update=update_ken_burns_effect)
 
     bpy.types.Scene.ken_burns_preset = bpy.props.EnumProperty(
         name="Target",
         description="Choose the zoom-in target position",
         items=[
-            ('CENTER', "Center", "", 'ANCHOR_CENTER', 0),
-            ('TOP_CENTER', "Center Top", "", 'ANCHOR_TOP', 1),
-            ('BOTTOM_CENTER', "Center Bottom", "", 'ANCHOR_BOTTOM', 2),
-            ('LEFT_CENTER', "Left Center", "", 'ANCHOR_LEFT', 3),
-            ('RIGHT_CENTER', "Right Center", "", 'ANCHOR_RIGHT', 4),
-            ('TOP_LEFT', "Top Left", "Zoom to top left corner", 'TRIA_TOPLEFT', 5),
-            ('TOP_RIGHT', "Top Right", "Zoom to top right corner", 'TRIA_TOPRIGHT', 6),
-            ('BOTTOM_LEFT', "Bottom Left", "Zoom to bottom left corner", 'TRIA_BOTTOMLEFT', 7),
-            ('BOTTOM_RIGHT', "Bottom Right", "Zoom to bottom right corner", 'TRIA_BOTTOMRIGHT', 8),
+            ('CENTER', "Center", "", custom_icons["ZOOM_CENTER"].icon_id, 0),
+            ('TOP_CENTER', "Center Top", "", custom_icons["ZOOM_TOP_CENTER"].icon_id, 1),
+            ('BOTTOM_CENTER', "Center Bottom", "", custom_icons["ZOOM_BOTTOM_CENTER"].icon_id, 2),
+            ('TOP_LEFT', "Top Left", "Zoom to top left corner", custom_icons["ZOOM_TOP_LEFT"].icon_id, 3),
+            ('LEFT_CENTER', "Left Center", "", custom_icons["ZOOM_MIDDLE_LEFT"].icon_id, 4),
+            ('BOTTOM_LEFT', "Bottom Left", "Zoom to bottom left corner", custom_icons["ZOOM_BOTTOM_LEFT"].icon_id, 5),
+            ('TOP_RIGHT', "Right Top", "Zoom to top right corner", custom_icons["ZOOM_TOP_RIGHT"].icon_id, 6),
+            ('RIGHT_CENTER', "Right Center", "", custom_icons["ZOOM_MIDDLE_RIGHT"].icon_id, 7),
+            ('BOTTOM_RIGHT', "Right Bottom", "Zoom to bottom right corner", custom_icons["ZOOM_BOTTOM_RIGHT"].icon_id, 8),
         ],
-        default='CENTER'
+        default='CENTER',
+        update=update_ken_burns_effect
     )
 
     bpy.types.Scene.interpolation = bpy.props.EnumProperty(
@@ -197,19 +288,26 @@ def register():
             ('BOUNCE', "Bounce", "Bouncing easing", 'IPO_BOUNCE', 11),
             ('ELASTIC', "Elastic", "Elastic easing", 'IPO_ELASTIC', 12),
         ],
-        default='LINEAR'
+        default='LINEAR',
+        update=update_ken_burns_effect
     )
 
     bpy.utils.register_class(AddKenBurnsEffect)
     bpy.utils.register_class(AddKenBurnsEffectPanel)
 
 def unregister():
+    global custom_icons
     bpy.utils.unregister_class(AddKenBurnsEffect)
     bpy.utils.unregister_class(AddKenBurnsEffectPanel)
     del bpy.types.Scene.in_value
     del bpy.types.Scene.out_value
     del bpy.types.Scene.ken_burns_preset
     del bpy.types.Scene.interpolation
+
+    # Release custom icons
+    if custom_icons is not None:
+        bpy.utils.previews.remove(custom_icons)
+        custom_icons = None
 
 if __name__ == "__main__":
     register()
