@@ -70,7 +70,7 @@ def remove_keyframes_from_active_strip(context):
 class AddKenBurnsEffect(bpy.types.Operator):
     """Add Ken Burns effect to selected image or movie strips"""
     bl_idname = "sequencer.add_ken_burns_effect"
-    bl_label = "Add Ken Burns Effect"
+    bl_label = "Ken Burns Effect"
 
     @classmethod
     def poll(cls, context):
@@ -210,7 +210,7 @@ def update_ken_burns_effect(self, context):
 
 class AddKenBurnsEffectPanel(bpy.types.Panel):
     """Panel for the Add Ken Burns Effect operator"""
-    bl_label = "Add Ken Burns Effect"
+    bl_label = "Ken Burns Effect"
     bl_idname = "SCENE_PT_add_ken_burns_effect"
     bl_space_type = 'SEQUENCE_EDITOR'
     bl_region_type = 'UI'
